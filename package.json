@@ -1,0 +1,22 @@
+{
+  "name": "jakarta-transit-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.0",
+    "hono": "^4.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250409.0",
+    "@types/bun": "latest",
+    "typescript": "^5.8.0",
+    "wrangler": "^4.0.0"
+  }
+}
