@@ -1,0 +1,19 @@
+# Large generated/dependency dirs
+node_modules/
+.wrangler/
+dist/
+
+# Lock files (not useful for Claude to read)
+bun.lock
+skills-lock.json
+
+# RFC — large doc, read explicitly when needed
+docs/
+
+# IDE/tool dirs
+.continue/
+.kiro/
+.agents/
+
+# Git internals
+.git/

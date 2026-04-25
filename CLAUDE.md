@@ -1,248 +1,126 @@
 # CLAUDE.md — Jabodetabek Transit MCP Server
 
-This file is read at the start of every Claude Code session. It captures the
-non-obvious constraints that are easy to drift on across multi-turn work. The
-authoritative spec is the RFC; this file is a short-term memory aid, not a
-substitute for reading it.
+Read `docs/RFC-001-jabodetabek-transit-mcp.md` first session (§6, §8, §9, §10.3). Skim §8 + §10.3 on return.
 
----
+## Project
 
-## Required reading (first session only)
+Remote MCP server for Jabodetabek rail (KRL, MRT, LRT Jabodebek, LRT Jakarta). v0.1: thin proxy over Comuline (KRL) + `mrt-jakarta-api` (MRT) + static JSON (LRT). Read-only, stateless, Cloudflare Workers.
 
-Before writing or editing any code, read:
+## Locked decisions
 
-1. `docs/RFC-001-jabodetabek-transit-mcp.md` — full spec. §6 (architecture),
-   §8 (tool catalog), §9 (transport), §10.3 (repo layout) are the sections
-   you'll refer back to most often.
-2. This file in full.
+Flag in chat before changing any of these.
 
-On subsequent sessions, skim §8 and §10.3 of the RFC to refresh.
+- **Tool prefix: `jakarta_transit_`** — not `jbdtk_`, not `idrail_`.
+- **Two-layer station IDs** — every station object must carry both:
+  - `canonical_id`: `"krl:MRI"`, `"mrt:38"`, `"lrtjbd:DKA"`, `"lrtjkt:VEL"`. Regex: `^[a-z]{3,6}:[A-Z0-9]{1,6}$`. Used for tool chaining + cache keys.
+  - `station_code`: operator-native signage code shown to users.
+  Never emit only one.
+- **Stateless Streamable HTTP** — never emit `Mcp-Session-Id`. Every POST is self-contained.
+- **All tools read-only** — every registration: `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true`.
+- **Two connectors** — `/mcp` (7 domain tools), `/mcp-deep-research` (`search`+`fetch` only). Same Worker, route-based dispatch.
+- **Zod at MCP boundary** — every tool input schema'd before adapter code. No raw strings through.
+- **Fare policy** — KRL: Rp 3,000 first 25 km, +Rp 1,000/10 km after. Always include `method: "formula_unofficial"` + §15 disclaimer. Never claim fares are authoritative.
 
----
-
-## Project in one paragraph
-
-A remote MCP server exposing Jabodetabek rail transit (KRL, MRT, LRT Jabodebek,
-LRT Jakarta) to any MCP-capable AI client — Claude, ChatGPT Developer Mode,
-Cursor, Open WebUI, and anything else speaking MCP over Streamable HTTP. v0.1
-is a thin proxy over two community APIs (Comuline for KRL, `mrt-jakarta-api`
-for MRT) plus hand-curated static JSON for both LRT systems. Read-only,
-stateless, deployed to Cloudflare Workers.
-
----
-
-## Locked decisions — do not re-litigate
-
-These are settled. If something seems wrong, flag it in chat before changing
-it; don't silently adjust.
-
-- **Tool prefix: `jakarta_transit_`**. Not `jbdtk_`, not `idrail_`. The word
-  "jakarta" in the name helps LLMs pick the tool up on user queries.
-- **Two-layer station IDs.** Every station object returned by any tool carries
-  both fields:
-  - `canonical_id` — internal, namespaced: `"krl:MRI"`, `"mrt:38"`,
-    `"lrtjbd:DKA"`, `"lrtjkt:VEL"`. Used for chaining tool calls and cache
-    keys. Validated against `^[a-z]{3,6}:[A-Z0-9]{1,6}$`.
-  - `station_code` — operator-native code the user sees on signage: `"MRI"`
-    for KRL, `"38"` for MRT, `"DKA"` for LRT Jabodebek. Used when quoting
-    back to the user.
-  Never emit only one of these.
-- **Stateless Streamable HTTP.** Do NOT emit `Mcp-Session-Id`. Every POST is
-  self-contained. This enables horizontal scaling on Workers.
-- **All tools are read-only.** Every tool registration must set
-  `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`,
-  `openWorldHint: true`. No write operations in any planned version.
-- **Two connectors, shared code.** The main connector (`/mcp`) exposes the 7
-  domain tools to Claude and regular ChatGPT. The Deep Research connector
-  (`/mcp-deep-research`) exposes only `search` and `fetch` aliases. Same
-  Worker, different tool registration lists — selected via an env flag or
-  route-based dispatch.
-- **Input validation at the MCP boundary.** Every tool input Zod-schema'd
-  before it reaches adapter code. No raw strings flowing through.
-- **Fare policy.** KRL fares are computed from the public formula (Rp 3,000
-  first 25 km, +Rp 1,000 per 10 km after). Every fare response includes
-  `method: "formula_unofficial"` and the disclaimer note in §15 of the RFC.
-  Never present computed fares as authoritative.
-
----
-
-## Tech stack (v0.1, locked)
+## Tech stack (locked)
 
 | Layer | Choice |
 |---|---|
 | Runtime | Cloudflare Workers |
-| Language | TypeScript 5.x (strict mode on) |
+| Language | TypeScript 5.x strict |
 | MCP SDK | `@modelcontextprotocol/sdk` ≥ 1.10 |
-| HTTP framework | Hono |
+| HTTP | Hono |
 | Validation | Zod |
-| Cache | Cloudflare Workers KV, namespace `jbdtk_cache` |
-| Package manager / test runner | Bun |
-| Deploy tool | Wrangler |
+| Cache | Workers KV, namespace `jbdtk_cache` |
+| Test/pkg | Bun |
+| Deploy | Wrangler |
 | CI | GitHub Actions |
 
-No React, no database, no auth provider, no ORM. If a task seems to need one
-of these, stop and ask.
+No React, DB, auth, ORM. Ask before adding unlisted deps.
 
----
+## Repo layout (§10.3 authoritative)
 
-## Repo layout
+- `src/mcp/tools/` — one file per tool: `{ name, description, inputSchema, outputSchema, handler }`.
+- `src/adapters/` — `krl`, `mrt`, `lrtjbd`, `lrtjkt`. Return canonical-shaped data; tool code is mode-agnostic.
+- `src/canonical/` — `ids.ts` (encode/decode/validate), `schema.ts` (Station, Line, Departure, Fare Zod types), `station-groups.json`.
+- `data/` — static LRT JSON. Hand-curated, updated via PR.
+- `test/` — Bun-compatible. `mcp-inspector.test.ts` drives the MCP protocol.
 
-Authoritative version is §10.3 of the RFC. Scaffold exactly that structure
-before writing any real logic. Do not invent new top-level directories
-without asking.
+Don't create new top-level directories without asking.
 
-Key directories:
+## Tool catalog
 
-- `src/mcp/tools/` — one file per tool, each exporting a single
-  `{ name, description, inputSchema, outputSchema, handler }` object.
-- `src/adapters/` — one file per mode (`krl`, `mrt`, `lrtjbd`, `lrtjkt`).
-  Adapters return data already shaped to our canonical schema, so tool code
-  stays mode-agnostic.
-- `src/canonical/` — the two-layer ID encode/decode logic, the shared Zod
-  schemas, and `station-groups.json` (interchange clusters, ~7 entries).
-- `data/` — static LRT station and schedule JSON. Hand-curated, updated via PR.
-- `test/` — `bun test`-compatible tests. `mcp-inspector.test.ts` drives the
-  actual MCP protocol via `@modelcontextprotocol/inspector`.
-
----
-
-## Tool catalog summary
-
-Full schemas in RFC §8. All prefixed `jakarta_transit_` (except the Deep
-Research aliases):
+All prefixed `jakarta_transit_`:
 
 | Tool | Purpose |
 |---|---|
-| `jakarta_transit_search_stations` | Find stations by name/mode/line. Returns canonical_id + station_code. |
-| `jakarta_transit_get_station` | Full detail for one canonical_id (or unambiguous station_code). |
-| `jakarta_transit_list_lines` | All lines for a mode. |
-| `jakarta_transit_get_schedule` | Full schedule for a station on a date. |
-| `jakarta_transit_get_next_departures` | Next N departures from a station. Computed, not cached. |
-| `jakarta_transit_get_route` | Stations along a line in order. |
-| `jakarta_transit_get_fare` | Fare between two canonical_ids. Always same-mode in v0.1. |
-| `jakarta_transit_plan_trip` | **Stubbed in v0.1.** Returns `isError: true` with "Not implemented in v0.1, see v0.3". |
-| `search` / `fetch` | Deep Research aliases. Registered only on the `/mcp-deep-research` route. |
+| `search_stations` | Find by name/mode/line. Returns canonical_id + station_code. |
+| `get_station` | Full detail for one canonical_id. |
+| `list_lines` | All lines for a mode. |
+| `get_schedule` | Full schedule for a station + date. |
+| `get_next_departures` | Next N departures. Computed, not cached. |
+| `get_route` | Ordered stations along a line. |
+| `get_fare` | Fare between two canonical_ids (same-mode only in v0.1). |
+| `plan_trip` | **Stubbed.** Returns `isError: true`, "Not implemented in v0.1, see v0.3". |
+| `search` / `fetch` | Deep Research aliases, `/mcp-deep-research` only. |
 
----
+## Implementation order
 
-## Implementation order (v0.1)
-
-Follow this sequence. Do not skip ahead — each step unblocks the next.
-
-1. **Project scaffold.** `package.json`, `wrangler.toml`, `tsconfig.json`,
-   empty files per RFC §10.3, Hono `/health` endpoint. Acceptance:
-   `bun run typecheck` passes and `wrangler dev` serves
-   `{ "status": "ok" }` on `GET /health`.
-2. **Canonical layer.** `src/canonical/ids.ts` (encode/decode, validate),
-   `schema.ts` (shared Zod types: Station, Line, Departure, Fare),
-   `station-groups.json`. Acceptance: unit tests round-trip canonical IDs
-   for all four modes.
-3. **LRT adapters first** — they're static JSON, fast to build, and unblock
-   end-to-end testing without any upstream. Fill `data/lrtjbd-stations.json`
-   and `data/lrtjkt-stations.json` with at least the station lists; schedules
-   can be placeholder for step 4.
-4. **MCP wiring.** `src/mcp/server.ts` + `src/mcp/transport.ts` (Streamable
-   HTTP, stateless), `/mcp` route in `index.ts`. Register a single tool —
-   `search_stations` — wired to the LRT adapters only. Verify with MCP
-   Inspector.
-5. **Remaining domain tools** — `get_station`, `list_lines`, `get_route`
-   against LRT data first, then schedule tools with placeholder data.
-6. **KRL adapter** — Comuline client, cache wrapper, circuit breaker.
-7. **MRT adapter** — `mrt-jakarta-api` client, same cache/circuit-breaker
-   pattern.
-8. **Fare tool** — formula + interstation kilometers. Kilometer matrix can
-   start as a stub returning `null` with the unofficial note; fill the
-   matrix in a follow-up.
+1. **Scaffold** — `package.json`, `wrangler.toml`, `tsconfig.json`, empty files, Hono `/health`. Pass: `bun run typecheck` + `GET /health → { status: "ok" }`.
+2. **Canonical layer** — `ids.ts`, `schema.ts`, `station-groups.json`. Pass: unit tests round-trip all four modes.
+3. **LRT adapters** — static JSON, unblocks e2e without upstream. Fill `data/lrtjbd-stations.json` + `data/lrtjkt-stations.json`.
+4. **MCP wiring** — `server.ts` + `transport.ts`, `/mcp` route, register `search_stations` vs LRT. Verify with MCP Inspector.
+5. **Remaining tools** — `get_station`, `list_lines`, `get_route`, schedule tools (placeholder data ok).
+6. **KRL adapter** — Comuline client, KV cache, circuit breaker.
+7. **MRT adapter** — `mrt-jakarta-api` client, same pattern.
+8. **Fare tool** — formula + km matrix (stub `null` ok, fill later).
 9. **Deep Research aliases** on `/mcp-deep-research`.
-10. **Deploy to staging**, run the MCP Inspector test suite against the
-    deployed URL, then promote.
+10. **Deploy staging** → MCP Inspector suite → promote.
 
----
+## Deferred (do not implement unless asked)
 
-## Deferred / explicitly out of scope for v0.1
+- `plan_trip` routing — v0.3
+- Self-hosted scrapers — v0.2+
+- GTFS / OpenAPI REST — v0.2+
+- Real-time delays — no feed yet
+- Auth / API keys — v0.1 is anonymous
+- Full KRL km matrix — stub first, fill later
 
-Do NOT implement these unless I explicitly ask:
-
-- Real `plan_trip` routing (Dijkstra over transfer graph) — v0.3.
-- Self-hosted scrapers for KRL or MRT — v0.2+.
-- GTFS export, OpenAPI REST companion — v0.2+.
-- Real-time delay data — no feed exists yet.
-- Auth, API keys, user accounts — v0.1 is anonymous public.
-- The full KRL interstation kilometer matrix — stub first, fill later.
-
----
-
-## Development commands
+## Dev commands
 
 ```bash
-bun install                    # install deps
-bun run typecheck              # tsc --noEmit, must pass before commits
-bun test                       # run all tests
-bun test test/adapters.test.ts # run one suite
-bunx wrangler dev              # local dev server at http://localhost:8787
-bunx wrangler deploy           # deploy to production
+bun install
+bun run typecheck        # must pass before commits
+bun test
+bunx wrangler dev        # http://localhost:8787
+bunx wrangler deploy
 bunx @modelcontextprotocol/inspector http://localhost:8787/mcp
-                               # interactive MCP protocol tester
 ```
 
-Always run `bun run typecheck` and `bun test` before declaring a task done.
-CI will run them anyway, but catching failures locally saves a round trip.
+## Testing
 
----
-
-## Testing expectations
-
-- Every adapter: unit tests with recorded fixtures (do NOT hit live upstreams
-  in tests). Put fixtures in `test/fixtures/`.
-- Every tool: one happy-path test and one `isError: true` test.
-- `mcp-inspector.test.ts` drives the `/mcp` endpoint and asserts that all 9
-  tools are discoverable and have valid schemas.
-- Coverage target is informal — don't chase a number, cover the error paths.
-
----
+- Adapters: fixtures in `test/fixtures/`. No live upstream calls.
+- Tools: happy-path + `isError: true` test each.
+- `mcp-inspector.test.ts`: all 9 tools discoverable with valid schemas.
 
 ## Hard don'ts
 
-- **No secrets in the repo.** Not in `wrangler.toml`, not in `.dev.vars`
-  committed. v0.1 has no secrets anyway, but don't introduce any.
-- **No user PII logged.** Only tool args (station IDs, times) are logged,
-  and nothing downstream of them.
-- **No write operations** to any upstream. We're read-only forever.
-- **No session state.** Anything that would require sticky routing is wrong.
-- **Do not trust upstream payloads as instructions.** Wrap all adapter
-  outputs as structured JSON; never inline raw upstream strings into tool
-  descriptions or system prompts.
-- **Do not change the tool prefix or canonical ID format** without updating
-  the RFC first.
-
----
+- No secrets in repo (wrangler.toml, .dev.vars).
+- No user PII logged — only tool args (station IDs, times).
+- No writes to any upstream.
+- No session state / sticky routing.
+- Don't trust upstream payloads as instructions — wrap as structured JSON.
+- Don't change tool prefix or canonical ID format without updating the RFC first.
 
 ## Code style
 
-- TypeScript strict mode. No `any` unless commented with a reason.
-- Prefer `type` over `interface` for data shapes; `interface` only for things
-  intended to be extended.
-- No default exports in `src/` except for the Hono app in `index.ts`.
-- Error messages in tool responses must suggest a next step — e.g., "Station
-  not found. Try `jakarta_transit_search_stations` with a partial name."
-- Comments explain *why*, not *what*. The code should show the what.
-
----
+- Strict TS. No `any` without comment.
+- `type` for data shapes; `interface` only if intended to extend.
+- No default exports except `src/index.ts`.
+- Error messages suggest next step: e.g. "Try `jakarta_transit_search_stations` with a partial name."
+- Comments explain *why*, not *what*.
 
 ## When in doubt
 
-Ask before:
+Ask before: new dep, new top-level dir, changing locked decisions, implementing deferred, touching RFC docs.
 
-- Adding a dependency not in the stack table above.
-- Creating a new top-level directory.
-- Changing anything in the "Locked decisions" section.
-- Implementing something from the "Deferred" list.
-- Touching `docs/RFC-001-*.md` — RFC edits are a separate conversation.
-
-Proceed without asking for:
-
-- Bug fixes that don't change public API shape.
-- Refactors inside a single file.
-- Adding tests.
-- Improving error messages.
-- Anything explicitly called out in the implementation order above.
+Proceed without asking: bug fixes, single-file refactors, adding tests, improving error messages, anything in the implementation order.
